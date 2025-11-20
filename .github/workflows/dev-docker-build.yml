@@ -34,13 +34,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
-      - name: Extract version from tag
+      - name: Extract version from tag and normalize owner
         shell: bash
         run: |
           # Extract version from tag (dev-v1.143.0 -> 1.143.0)
           TAG_VERSION="${GITHUB_REF_NAME#dev-v}"
           echo "DEV_VERSION=${TAG_VERSION}" >> $GITHUB_ENV
           echo "Building development version: ${TAG_VERSION}"
+
+          # Normalize repository owner to lowercase (Docker requirement)
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "OWNER_LOWERCASE=${OWNER_LC}" >> $GITHUB_ENV
+          echo "Repository owner (lowercase): ${OWNER_LC}"
 
       - name: Extract version from pyproject.toml
         shell: bash
@@ -66,7 +71,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             dev.build=true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/synapse-dev
+            ghcr.io/${{ env.OWNER_LOWERCASE }}/synapse-dev
           file: "docker/Dockerfile"
           platforms: ${{ matrix.platform }}
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
@@ -98,11 +103,15 @@ jobs:
           pattern: digests-*
           merge-multiple: true
 
-      - name: Extract version from tag
+      - name: Extract version from tag and normalize owner
         shell: bash
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#dev-v}"
           echo "DEV_VERSION=${TAG_VERSION}" >> $GITHUB_ENV
+
+          # Normalize repository owner to lowercase (Docker requirement)
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "OWNER_LOWERCASE=${OWNER_LC}" >> $GITHUB_ENV
 
       - name: Log in to GHCR
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
@@ -118,7 +127,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/synapse-dev
+          images: ghcr.io/${{ env.OWNER_LOWERCASE }}/synapse-dev
           flavor: |
             latest=false
           tags: |
@@ -129,7 +138,7 @@ jobs:
       - name: Create manifest list and push
         working-directory: ${{ runner.temp }}/digests
         env:
-          REPOSITORY: ghcr.io/${{ github.repository_owner }}/synapse-dev
+          REPOSITORY: ghcr.io/${{ env.OWNER_LOWERCASE }}/synapse-dev
         run: |
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf "$REPOSITORY@sha256:%s " *)
@@ -145,7 +154,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Usage:**" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "docker pull ghcr.io/${{ github.repository_owner }}/synapse-dev:${{ env.DEV_VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ghcr.io/${{ env.OWNER_LOWERCASE }}/synapse-dev:${{ env.DEV_VERSION }}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
