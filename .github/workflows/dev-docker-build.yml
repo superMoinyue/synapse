@@ -1,0 +1,153 @@
+@@ -0,0 +1,152 @@
+# GitHub Actions workflow for building development Docker images
+# Triggered by tags matching 'dev-v*' pattern (e.g., dev-v1.143.0)
+# Images are pushed to GitHub Container Registry (ghcr.io)
+
+name: Dev Docker Build
+
+on:
+  push:
+    tags: ["dev-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build and push image for ${{ matrix.platform }}
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runs_on: ubuntu-24.04
+            suffix: linux-amd64
+          - platform: linux/arm64
+            runs_on: ubuntu-24.04-arm
+            suffix: linux-arm64
+    steps:
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Extract version from tag
+        shell: bash
+        run: |
+          # Extract version from tag (dev-v1.143.0 -> 1.143.0)
+          TAG_VERSION="${GITHUB_REF_NAME#dev-v}"
+          echo "DEV_VERSION=${TAG_VERSION}" >> $GITHUB_ENV
+          echo "Building development version: ${TAG_VERSION}"
+
+      - name: Extract version from pyproject.toml
+        shell: bash
+        run: |
+          echo "SYNAPSE_VERSION=$(grep "^version" pyproject.toml | sed -E 's/version\s*=\s*["]([^"]*)["]/\1/')" >> $GITHUB_ENV
+
+      - name: Log in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          push: true
+          labels: |
+            gitsha1=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.DEV_VERSION }}
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            dev.build=true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/synapse-dev
+          file: "docker/Dockerfile"
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v5
+        with:
+          name: digests-${{ matrix.suffix }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Create and push multi-platform manifest
+    runs-on: ubuntu-latest
+    needs:
+      - build
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Extract version from tag
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#dev-v}"
+          echo "DEV_VERSION=${TAG_VERSION}" >> $GITHUB_ENV
+
+      - name: Log in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Calculate docker image tags
+        id: meta
+        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/synapse-dev
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=${{ env.DEV_VERSION }}
+            type=raw,value=latest-dev
+            type=sha,prefix=dev-
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          REPOSITORY: ghcr.io/${{ github.repository_owner }}/synapse-dev
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "$REPOSITORY@sha256:%s " *)
+
+      - name: Output image information
+        run: |
+          echo "## 🎉 Development Docker Image Built Successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Tags:**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "$DOCKER_METADATA_OUTPUT_JSON" | jq -r '.tags[]' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Usage:**" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ghcr.io/${{ github.repository_owner }}/synapse-dev:${{ env.DEV_VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
